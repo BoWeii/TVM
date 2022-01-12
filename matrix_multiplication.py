@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from IPython import display
 import d2ltvm
 
-tgt = tvm.target.Target(target="llvm", host="llvm")
+tgt = tvm.target.Target(target="llvm -mcpu=core-avx2", host="llvm -mcpu=core-avx2")
 dev = tvm.device(tgt.kind.name, 0)
 
 
@@ -99,6 +99,8 @@ sizes = 2 ** np.arange(5, 12, 1)
 exe_times = [bench_workload(np_matmul_timer(n)) for n in sizes]
 np_gflops = 2 * sizes ** 3 / 1e9 / np.array(exe_times)
 
+print("sizes=", sizes)
+
 
 # Save to the d2ltvm package.
 def bench_matmul_tvm(func, sizes):
@@ -123,6 +125,7 @@ def default(n):
 # default part
 s, args = default(64)
 mod = tvm.build(s, args)
+print("====default====")
 print(tvm.lower(s, args, simple_mode=True))
 default_gflops = bench_matmul_tvm(default, sizes)
 
@@ -137,6 +140,7 @@ def reorder(n):
 # reorder part
 s, args = reorder(64)
 mod = tvm.build(s, args)
+print("====reorder====")
 print(tvm.lower(s, args, simple_mode=True))
 reorder_gflops = bench_matmul_tvm(reorder, sizes)
 
@@ -149,17 +153,17 @@ def parallel(n):
 
 # parallel part
 s, args = parallel(64)
+print("====parallel====")
 print(tvm.lower(s, args, simple_mode=True))
 parallel_gflops = bench_matmul_tvm(parallel, sizes)
 
 
-def block(n):
+def tiling(n):
     tx, ty, tk = 32, 32, 4
-    s, (A, B, C) = parallel(n)
+    s, (A, B, C) = default(n)
     xo, yo, xi, yi = s[C].tile(*C.op.axis, tx, ty)
     xy = s[C].fuse(xo, yo)
     s[C].parallel(xy)
-    # Optimize the computation of each block
     ko, ki = s[C].split(s[C].op.reduce_axis[0], factor=tk)
     s[C].reorder(ko, xi, ki, yi)
     s[C].vectorize(yi)
@@ -168,38 +172,37 @@ def block(n):
 
 
 # block part
-s, args = block(64)
+s, args = tiling(64)
+print("====tiling====")
 print(tvm.lower(s, args, simple_mode=True))
-blocked_gflops = bench_matmul_tvm(block, sizes)
+blocked_gflops = bench_matmul_tvm(tiling, sizes)
 
 
-def cached_block(n):
-    tx, ty, tk = 32, 32, 4
-    s, (A, B, C) = parallel(n)
-    CachedC = s.cache_write(C, 'local')
-    # Same as before, first tile by blocks, and then parallelize the
-    # computation of each block
-    xo, yo, xi, yi = s[C].tile(*C.op.axis, tx, ty)
-    xy = s[C].fuse(xo, yo)
-    s[C].parallel(xy)
-    # Use the write cache for the output of the xy axis, namely a block.
-    s[CachedC].compute_at(s[C], xy)
-    # Same as before to optimize the computation of a block .
-    xc, yc = s[CachedC].op.axis
-    ko, ki = s[CachedC].split(CachedC.op.reduce_axis[0], factor=tk)
-    s[CachedC].reorder(ko, xc, ki, yc)
-    s[CachedC].unroll(ki)
-    s[CachedC].vectorize(yc)
-    return s, (A, B, C)
+# def cached_block(n):
+#     tx, ty, tk = 32, 32, 4
+#     s, (A, B, C) = default(n)
+#     CachedC = s.cache_write(C, 'local')
+#     xo, yo, xi, yi = s[C].tile(*C.op.axis, tx, ty)
+#     xy = s[C].fuse(xo, yo)
+#     s[C].parallel(xy)
+#     s[CachedC].compute_at(s[C], xy)
+#     xc, yc = s[CachedC].op.axis
+#     ko, ki = s[CachedC].split(CachedC.op.reduce_axis[0], factor=tk)
+#     s[CachedC].reorder(ko, xc, ki, yc)
+#     s[CachedC].unroll(ki)
+#     s[CachedC].vectorize(yc)
+#     return s, (A, B, C)
 
 
 # cached_block part
-s, args = cached_block(64)
-print(tvm.lower(s, args, simple_mode=True))
-cached_gflops = bench_matmul_tvm(cached_block, sizes)
+# s, args = cached_block(64)
+# print(tvm.lower(s, args, simple_mode=True))
+# cached_gflops = bench_matmul_tvm(cached_block, sizes)
 
+auto_tuning = [112.24714585, 340.15922519, 581.43641322, 556.97408956, 626.33097227, 531.17535322, 360.36149984]
 # draw the result
-plot_gflops(sizes, [np_gflops, default_gflops, reorder_gflops, parallel_gflops, blocked_gflops, cached_gflops],
-            ['numpy', 'default', 'reorder', 'parallel', 'block', 'cache'])
+plot_gflops(sizes,
+            [np_gflops, default_gflops, reorder_gflops, parallel_gflops, blocked_gflops, auto_tuning],
+            ['numpy', 'default', 'reorder', 'reorder+parallel', 'reorder+parallel+tiling', 'auto_tuning'])
 
 print("end!!!!")
